@@ -29,11 +29,12 @@ from supervoice_gpt import SupervoiceGPT, Tokenizer, config
 from utils.datasets import create_dataset_loader
 
 # Train parameters
-train_experiment = "big_dataset"
-train_project="supervoice-gpt"
+train_experiment = "exp-01"
+train_project="supervoice-gpt-facodec"
 train_auto_resume = True
-train_batch_size = 48 # Per GPU
-train_sequence_length = 256
+train_batch_size = 8 # Per GPU
+train_sequence_input_length = 640
+train_sequence_output_length = 2048
 train_grad_accum_every = 4 # Simulate 8 gpu using 2 gpus
 train_steps = 600000
 train_loader_workers = 2
@@ -54,7 +55,7 @@ def main():
 
     # Prepare accelerator
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs], gradient_accumulation_steps = train_grad_accum_every, mixed_precision=train_mixed_precision)
+    accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs], gradient_accumulation_steps = train_grad_accum_every, mixed_precision=train_mixed_precision, split_batches=True)
     device = accelerator.device
     output_dir = Path("./output")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +70,7 @@ def main():
     # Prepare dataset
     accelerator.print("Loading dataset...")
     tokenizer = Tokenizer(config, "./tokenizer_text.model")
-    train_loader = create_dataset_loader("./datasets/train.txt", batch_size = train_batch_size, sequence_length = train_sequence_length, workers = train_loader_workers, tokenizer = tokenizer)
+    train_loader = create_dataset_loader("./external_datasets/librilight-processed/files_all.txt", batch_size = train_batch_size, input_length = train_sequence_input_length, output_length = train_sequence_output_length, workers = train_loader_workers, tokenizer = tokenizer)
 
     # Model
     accelerator.print("Loading model...")
@@ -89,7 +90,6 @@ def main():
     model, optim, train_loader = accelerator.prepare(model, optim, train_loader)
     train_cycle = cycle(train_loader)
     hps = {
-        "sequence_length": train_sequence_length, 
         "train_lr_start": train_lr_start, 
         "train_lr_max": train_lr_max, 
         "batch_size": train_batch_size, 
@@ -158,25 +158,21 @@ def main():
                 with accelerator.autocast():
 
                     # Load batch
-                    x, x_lengths, y_p, y_d, y_pi, y_lengths, t_p, t_d, t_pi = next(train_cycle)
+                    x, y, t, x_lengths, y_lengths = next(train_cycle)
                     
                     # Forward
-                    _, _, _, loss = model(
+                    _, loss = model(
 
                         # Inputs
                         input = x, 
                         input_lengths = x_lengths,
 
                         # Outputs
-                        output_tokens = y_p,
-                        output_durations = y_d,
-                        output_pitches = y_pi,
+                        output_tokens = y,
                         output_lengths = y_lengths,
 
                         # Targets
-                        target_tokens = t_p,
-                        target_durations = t_d,
-                        target_pitches = t_pi
+                        target_tokens = t
                     )
 
                     # if torch.isnan(loss).any():

@@ -25,6 +25,8 @@ config = dict_to_object({
 
         # Maximum duration values
         "max_duration": 100,
+
+        "code_dim": 4,
     },
 
     "tokenizer_style":{
