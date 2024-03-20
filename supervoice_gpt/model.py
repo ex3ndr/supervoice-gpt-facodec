@@ -15,7 +15,8 @@ class SupervoiceGPT(torch.nn.Module):
         torch.nn.init.normal_(self.input_embedding.weight, mean=0.0, std=0.02)
         self.output_embeddings = []
         for i in range(config.gpt.code_dim):
-            self.output_embeddings.append(torch.nn.Embedding(self.n_output_tokens, self.config.gpt.n_dim))
+            d = self.config.gpt.n_dim // self.config.gpt.code_dim if self.config.gpt.code_mode == "combine" else self.config.gpt.n_dim
+            self.output_embeddings.append(torch.nn.Embedding(self.n_output_tokens, d))
             torch.nn.init.normal_(self.output_embeddings[i].weight, mean=0.0, std=0.02)
         self.output_embeddings = torch.nn.ModuleList(self.output_embeddings)
 
@@ -58,7 +59,8 @@ class SupervoiceGPT(torch.nn.Module):
         # Prediction heads
         self.prediction_heads = []
         for i in range(config.gpt.code_dim):
-            self.prediction_heads.append(torch.nn.Linear(self.config.gpt.n_dim, self.n_output_tokens, bias=False))
+            d = self.config.gpt.n_dim // self.config.gpt.code_dim if self.config.gpt.code_mode == "combine" else self.config.gpt.n_dim
+            self.prediction_heads.append(torch.nn.Linear(d, self.n_output_tokens, bias=False))
         self.prediction_heads = torch.nn.ModuleList(self.prediction_heads)
 
         # Weight sharing
@@ -102,9 +104,14 @@ class SupervoiceGPT(torch.nn.Module):
         input_embedded = self.input_embedding(input)
         
         # Output embeddings
-        output_embedded = self.output_embeddings[0](output_tokens[:, :, 0])
-        for i in range(1, self.config.gpt.code_dim):
-            output_embedded += self.output_embeddings[i](output_tokens[:, :, i])
+        if self.config.gpt.code_mode == "mix":
+            output_embedded = self.output_embeddings[0](output_tokens[:, :, 0])
+            for i in range(1, self.config.gpt.code_dim):
+                output_embedded += self.output_embeddings[i](output_tokens[:, :, i])
+        elif self.config.gpt.code_mode == "combine":
+            output_embedded = self.output_embeddings[0](output_tokens[:, :, 0])
+            for i in range(1, self.config.gpt.code_dim):
+                output_embedded = torch.cat((output_embedded, self.output_embeddings[i](output_tokens[:, :, i])), dim = -1)
 
         # Run an encoder
         latents = self.encoder(input_embedded, mask = input_mask)
@@ -115,7 +122,10 @@ class SupervoiceGPT(torch.nn.Module):
         # Run prediction head
         predicted = []
         for i in range(self.config.gpt.code_dim):
-            predicted.append(self.prediction_heads[i](decoded))
+            if self.config.gpt.code_mode == "mix":
+                predicted.append(self.prediction_heads[i](decoded))
+            elif self.config.gpt.code_mode == "combine":
+                predicted.append(self.prediction_heads[i](decoded[:, :, i * (self.config.gpt.n_dim // self.config.gpt.code_dim):(i + 1) * (self.config.gpt.n_dim // self.config.gpt.code_dim)]))
 
         # Compute loss if targets are provided
         if target_tokens is not None:
@@ -126,76 +136,62 @@ class SupervoiceGPT(torch.nn.Module):
 
         return predicted
 
-    # @torch.no_grad()
-    # def generate(self, input, tokenizer, max_new_tokens = 128, temperature=1.0, top_k=None, deterministic = False, device="cpu"):
-    #     ctx_input = torch.tensor([tokenizer.sequence_begin_token_id] + tokenizer.encode(input) + [tokenizer.sequence_end_token_id], device = device).unsqueeze(0)
-    #     ctx_output_tokens = torch.tensor([tokenizer.sequence_begin_token_id], device = device).unsqueeze(0)
-    #     ctx_output_durations = torch.tensor([0], device = device).unsqueeze(0)
-    #     ctx_output_pitch = torch.tensor([0], device = device).unsqueeze(0)
-    #     valid_exit = False
-    #     for _ in range(max_new_tokens):
+    @torch.no_grad()
+    def generate(self, input, tokenizer, max_new_tokens = 128, temperature=1.0, top_k=None, deterministic = False, device="cpu"):
+        ctx_input = torch.tensor([tokenizer.sequence_begin_token_id] + tokenizer.encode(input) + [tokenizer.sequence_end_token_id], device = device)
+        ctx_output_tokens = torch.tensor([[tokenizer.sequence_begin_token_id, 0, 0, 0]], device = device)
+        valid_exit = False
+        for _ in range(max_new_tokens):
             
-    #         # Forward the model to get the logits for the index in the sequence
-    #         logits_token, logits_duration, logits_pitch = self(input = ctx_input, output_tokens = ctx_output_tokens, output_durations = ctx_output_durations, output_pitches = ctx_output_pitch)
+            # Forward the model to get the logits for the index in the sequence
+            logits = self(input = ctx_input.unsqueeze(0), output_tokens = ctx_output_tokens.unsqueeze(0))
+            # print(logits.shape)
             
-    #         # Pluck the logits at the final step and scale by desired temperature
-    #         logits_token = logits_token[:, -1, :] / temperature
-    #         logits_duration = logits_duration[:, -1, :] / temperature
-    #         logits_pitch = logits_pitch[:, -1, :] / temperature
+            # Pluck the logits at the final step and scale by desired temperature
+            for i in range(self.config.gpt.code_dim):
+                logits[i] = logits[i][:, -1, :] / temperature
 
-    #         # Truncate the logits to only having generate tokens
-    #         # logits = logits[:, :self.n_generate_tokens]
+            # Truncate the logits to only having generate tokens
+            # logits = logits[:, :self.n_generate_tokens]
 
-    #         # Remove padding values
-    #         logits_token[:, 0] = -float('Inf')
-    #         logits_duration[:, 0] = -float('Inf')
-    #         logits_pitch[:, 0] = -float('Inf')
+            # Remove padding values
+            for i in range(self.config.gpt.code_dim):
+                logits[i][:, 0] = -float('Inf')
             
-    #         # Optionally crop the logits to only the top k options
-    #         if top_k is not None:
-    #             v, _ = torch.topk(logits_token, min(top_k, logits_token.size(-1)))
-    #             logits_token[logits_token < v[:, [-1]]] = -float('Inf')
-    #             v, _ = torch.topk(logits_duration, min(top_k, logits_duration.size(-1)))
-    #             logits_duration[logits_duration < v[:, [-1]]] = -float('Inf')
-    #             v, _ = torch.topk(logits_pitch, min(top_k, logits_pitch.size(-1)))
-    #             logits_pitch[logits_pitch < v[:, [-1]]] = -float('Inf')
+            # Optionally crop the logits to only the top k options
+            if top_k is not None:
+                for i in range(self.config.gpt.code_dim):
+                    v, _ = torch.topk(logits[i], min(top_k, logits[i].size(-1)))
+                    logits[i][logits[i] < v[:, [-1]]] = -float('Inf')
             
-    #         # Apply softmax to convert logits to (normalized) probabilities
-    #         probs_token = F.softmax(logits_token, dim=-1)
-    #         probs_duration = F.softmax(logits_duration, dim=-1)
-    #         probs_pitch = F.softmax(logits_pitch, dim=-1)
+            # Apply softmax to convert logits to (normalized) probabilities
+            probs = []
+            for i in range(self.config.gpt.code_dim):
+                probs.append(F.softmax(logits[i], dim=-1))
             
-    #         # Sample from the distribution
-    #         if deterministic:
-    #             idx_next_token = torch.argmax(probs_token, dim=-1, keepdim=True)
-    #             idx_next_duration = torch.argmax(probs_duration, dim=-1, keepdim=True)
-    #             idx_next_pitch = torch.argmax(probs_pitch, dim=-1, keepdim=True)
-    #         else:
-    #             idx_next_token = torch.multinomial(probs_token, num_samples=1)
-    #             idx_next_duration = torch.multinomial(probs_duration, num_samples=1)
-    #             idx_next_pitch = torch.multinomial(probs_pitch, num_samples=1)
-            
-    #         # Append Context
-    #         ctx_output_tokens = torch.cat((ctx_output_tokens, idx_next_token), dim=1)
-    #         ctx_output_durations = torch.cat((ctx_output_durations, idx_next_duration), dim=1)
-    #         ctx_output_pitch = torch.cat((ctx_output_pitch, idx_next_pitch), dim=1)
+            # Sample from the distribution
+            idx_next_token = []
+            if deterministic:
+                for i in range(self.config.gpt.code_dim):
+                    idx_next_token.append(torch.argmax(probs[i], dim=-1))
+            else:
+                for i in range(self.config.gpt.code_dim):
+                    idx_next_token.append(torch.multinomial(probs[i], num_samples=1)[0])
+            idx_next_token = torch.cat(idx_next_token, dim=0)
 
-    #         # Stop Tokens
-    #         if idx_next_token == tokenizer.sequence_end_token_id:
-    #             valid_exit = True
-    #             break
+            # Append Context
+            ctx_output_tokens = torch.cat((ctx_output_tokens, idx_next_token.unsqueeze(0)), dim=0)
 
-    #     tokens = tokenizer.decode_phonemes(ctx_output_tokens.squeeze(0).cpu().tolist())
-    #     durations = (ctx_output_durations.squeeze(0).cpu() - 1).tolist()
-    #     pitches = (ctx_output_pitch.squeeze(0).cpu() - 1).tolist()
-    #     tokens = tokens[1:]
-    #     durations = durations[1:]
-    #     pitches = pitches[1:]
-    #     if valid_exit:
-    #         tokens = tokens[:-1]
-    #         durations = durations[:-1]
-    #         pitches = pitches[:-1]
-    #     return list(zip(tokens, durations, pitches))
+            # Stop Tokens
+            if idx_next_token[0] == tokenizer.sequence_end_token_id:
+                valid_exit = True
+                break
+
+        # Post-process
+        tokens = ctx_output_tokens.cpu()[1:,:]
+        if valid_exit:
+            tokens = tokens[:-1,:]
+        return tokens
 
     # def predict_next(self, input, output_tokens, output_durations, tokenizer, top_k = 10, device = "cpu"):
 

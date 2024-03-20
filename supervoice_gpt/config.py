@@ -27,6 +27,7 @@ config = dict_to_object({
         "max_duration": 100,
 
         "code_dim": 4,
+        "code_mode": "combine" # or "combine"
     },
 
     "tokenizer_style":{

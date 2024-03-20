@@ -29,7 +29,7 @@ from supervoice_gpt import SupervoiceGPT, Tokenizer, config
 from utils.datasets import create_dataset_loader
 
 # Train parameters
-train_experiment = "exp-01"
+train_experiment = "exp-02"
 train_project="supervoice-gpt-facodec"
 train_auto_resume = True
 train_batch_size = 8 # Per GPU
