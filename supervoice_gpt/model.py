@@ -140,7 +140,6 @@ class SupervoiceGPT(torch.nn.Module):
     def generate(self, input, tokenizer, max_new_tokens = 128, temperature=1.0, top_k=None, deterministic = False, device="cpu"):
         ctx_input = torch.tensor([tokenizer.sequence_begin_token_id] + tokenizer.encode(input) + [tokenizer.sequence_end_token_id], device = device)
         ctx_output_tokens = torch.tensor([[tokenizer.sequence_begin_token_id, 0, 0, 0]], device = device)
-        valid_exit = False
         for _ in range(max_new_tokens):
             
             # Forward the model to get the logits for the index in the sequence
@@ -157,6 +156,9 @@ class SupervoiceGPT(torch.nn.Module):
             # Remove padding values
             for i in range(self.config.gpt.code_dim):
                 logits[i][:, 0] = -float('Inf')
+                logits[i][:, tokenizer.sequence_begin_token_id] = -float('Inf')
+                if i != 0:
+                    logits[i][:, tokenizer.sequence_end_token_id] = -float('Inf')
             
             # Optionally crop the logits to only the top k options
             if top_k is not None:
@@ -179,19 +181,15 @@ class SupervoiceGPT(torch.nn.Module):
                     idx_next_token.append(torch.multinomial(probs[i], num_samples=1)[0])
             idx_next_token = torch.cat(idx_next_token, dim=0)
 
-            # Append Context
-            ctx_output_tokens = torch.cat((ctx_output_tokens, idx_next_token.unsqueeze(0)), dim=0)
-
             # Stop Tokens
             if idx_next_token[0] == tokenizer.sequence_end_token_id:
-                valid_exit = True
                 break
 
+            # Append Context
+            ctx_output_tokens = torch.cat((ctx_output_tokens, idx_next_token.unsqueeze(0) - 3), dim=0)
+
         # Post-process
-        tokens = ctx_output_tokens.cpu()[1:,:]
-        if valid_exit:
-            tokens = tokens[:-1,:]
-        return tokens
+        return ctx_output_tokens.cpu()[1:,:]
 
     # def predict_next(self, input, output_tokens, output_durations, tokenizer, top_k = 10, device = "cpu"):
 
